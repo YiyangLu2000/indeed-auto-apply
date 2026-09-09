@@ -172,7 +172,7 @@ async def capture(
     config.ensure_dirs()
     url = indeed_url or config.INDEED_BASE_URL
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=False)
+        browser = await launch_chromium(pw, headless=False)
         context = await browser.new_context()
         page = await context.new_page()
         await page.goto(url, wait_until="domcontentloaded")
@@ -243,6 +243,26 @@ async def _safe_close(browser) -> None:
         pass
 
 
+async def launch_chromium(pw, *, headless: bool):
+    """Launch Chromium, honouring ``INDEED_BROWSER_CHANNEL`` (``chrome`` / ``msedge``).
+
+    Driving the real installed Chrome/Edge often clears a Cloudflare managed
+    challenge that Playwright's bundled Chromium loops on — it's the actual
+    browser, not a fingerprint patch. Falls back to bundled Chromium if the
+    requested channel isn't installed.
+    """
+    channel = config.browser_channel()
+    if channel:
+        try:
+            return await pw.chromium.launch(headless=headless, channel=channel)
+        except Exception as exc:
+            print(
+                f"! browser channel {channel!r} unavailable ({exc}); "
+                "falling back to bundled Chromium"
+            )
+    return await pw.chromium.launch(headless=headless)
+
+
 async def _await_enter(page, *, prompt: str, poll_ms: int = 500) -> None:
     """Block until the operator presses ENTER (or ~2 min pass if stdin isn't a tty)."""
     print(prompt)
@@ -273,7 +293,7 @@ async def manual_unblock(*, indeed_url: str | None = None, attempts: int = 5) ->
     config.ensure_dirs()
     url = (indeed_url or config.INDEED_BASE_URL).rstrip("/") + "/"
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=False)
+        browser = await launch_chromium(pw, headless=False)
         context = await browser.new_context(storage_state=restore())
         page = await context.new_page()
         try:

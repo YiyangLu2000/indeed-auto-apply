@@ -24,7 +24,7 @@ from . import config
 from .errors import ManualActionRequired, SessionExpired
 from .job_selector import JobPosting
 from .profile import Profile
-from .session_manager import check_validity, detect_block, restore
+from .session_manager import check_validity, detect_block, launch_chromium, restore
 from .state_machine import Status, is_terminal, transition
 from .storage import Application, Storage
 
@@ -327,7 +327,7 @@ async def _drive(
     page = None
     try:
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=headless)
+            browser = await launch_chromium(pw, headless=headless)
             context = await browser.new_context(storage_state=restore())
             try:
                 ok, reason = await check_validity(context)

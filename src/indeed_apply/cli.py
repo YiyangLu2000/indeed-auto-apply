@@ -8,6 +8,7 @@ typed errors and prints a short, actionable line instead of a traceback.
 from __future__ import annotations
 
 import asyncio
+import os
 
 import typer
 
@@ -23,6 +24,19 @@ app = typer.Typer(
     help="Minimal end-to-end Indeed auto-apply workflow.",
     no_args_is_help=True,
 )
+
+_BROWSER_OPT = typer.Option(
+    None,
+    "--browser",
+    help="Drive a real browser: 'chrome' or 'msedge' (default: bundled Chromium). "
+    "Try this if Indeed's Cloudflare check loops. Same as INDEED_BROWSER_CHANNEL.",
+)
+
+
+def _use_browser(channel: str | None) -> None:
+    """Route --browser into the env var every launch helper reads."""
+    if channel:
+        os.environ["INDEED_BROWSER_CHANNEL"] = channel
 
 
 def _storage() -> Storage:
@@ -53,18 +67,20 @@ def keygen() -> None:
 
 
 @app.command()
-def login() -> None:
+def login(browser: str = _BROWSER_OPT) -> None:
     """Headed browser: log in to Indeed manually, then the session is captured.
 
     (Equivalent to ``capture-session`` — the two are merged so capture happens
     while the authenticated browser is still open.)
     """
+    _use_browser(browser)
     _capture()
 
 
 @app.command("capture-session")
-def capture_session() -> None:
+def capture_session(browser: str = _BROWSER_OPT) -> None:
     """Open a headed browser, wait for manual login, store the encrypted session."""
+    _use_browser(browser)
     _capture()
 
 
@@ -81,8 +97,10 @@ def session_status(
     check: bool = typer.Option(
         False, "--check", help="Launch a headless browser and probe Indeed for validity."
     ),
+    browser: str = _BROWSER_OPT,
 ) -> None:
     """Report whether a captured session is present, its age, and (optionally) validity."""
+    _use_browser(browser)
     if not session_manager.is_present():
         typer.echo("session: MISSING — run `login`")
         raise typer.Exit(1)
@@ -103,10 +121,10 @@ def session_status(
 async def _probe_validity():
     from playwright.async_api import async_playwright
 
-    from .session_manager import check_validity, restore
+    from .session_manager import check_validity, launch_chromium, restore
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
+        browser = await launch_chromium(pw, headless=True)
         try:
             context = await browser.new_context(storage_state=restore())
             return await check_validity(context)
@@ -115,15 +133,18 @@ async def _probe_validity():
 
 
 @app.command()
-def unblock() -> None:
+def unblock(browser: str = _BROWSER_OPT) -> None:
     """Open a visible browser so YOU can clear an Indeed anti-bot wall.
 
     Use when another command reports a 'Request Blocked' / anti-bot wall. A
-    Chromium window opens with your restored session; complete any 'verify you
+    browser window opens with your restored session; complete any 'verify you
     are human' check yourself (or wait / reload for a hard block), then press
     ENTER. The cleared session is re-saved so later commands reuse it. This
     never solves a challenge for you.
+
+    If the bundled Chromium loops on the check, retry with ``--browser chrome``.
     """
+    _use_browser(browser)
     try:
         asyncio.run(session_manager.manual_unblock())
     except IndeedApplyError as exc:
@@ -142,8 +163,10 @@ def select_jobs_cmd(
     headed: bool = typer.Option(
         False, "--headed", help="Show the browser (can help past an anti-bot block)."
     ),
+    browser: str = _BROWSER_OPT,
 ) -> None:
     """Search Indeed with the restored session; persist matches as PENDING rows."""
+    _use_browser(browser)
     storage = _storage()
     profile = load_profile()
     try:
@@ -180,10 +203,10 @@ def select_jobs_cmd(
 async def _run_select(storage, profile, query, location, limit, headed=False):
     from playwright.async_api import async_playwright
 
-    from .session_manager import check_validity, restore
+    from .session_manager import check_validity, launch_chromium, restore
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=not headed)
+        browser = await launch_chromium(pw, headless=not headed)
         try:
             context = await browser.new_context(storage_state=restore())
             ok, reason = await check_validity(context)
@@ -204,8 +227,10 @@ async def _run_select(storage, profile, query, location, limit, headed=False):
 def apply_all(
     confirm: bool = typer.Option(False, "--confirm", help="Actually submit applications."),
     headless: bool = typer.Option(False, "--headless"),
+    browser: str = _BROWSER_OPT,
 ) -> None:
     """Run the apply flow for every PENDING application row."""
+    _use_browser(browser)
     storage = _storage()
     profile = load_profile()
     pending = storage.list(Status.PENDING)
@@ -224,8 +249,10 @@ def apply(
     job_id: int = typer.Argument(..., help="applications.id from `status` / `select-jobs`"),
     confirm: bool = typer.Option(False, "--confirm"),
     headless: bool = typer.Option(False, "--headless"),
+    browser: str = _BROWSER_OPT,
 ) -> None:
     """Run the apply flow for one application row."""
+    _use_browser(browser)
     storage = _storage()
     row = storage.get(job_id)
     if row is None:
@@ -243,10 +270,12 @@ def resume(
     job_id: int = typer.Argument(...),
     confirm: bool = typer.Option(False, "--confirm"),
     headless: bool = typer.Option(False, "--headless"),
+    browser: str = _BROWSER_OPT,
 ) -> None:
     """Resume a MANUAL_ACTION_REQUIRED application. Idempotent."""
     from . import apply_runner
 
+    _use_browser(browser)
     storage = _storage()
     try:
         result = asyncio.run(

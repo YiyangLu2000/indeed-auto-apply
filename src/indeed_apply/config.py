@@ -57,6 +57,17 @@ def session_key_env() -> str | None:
     return os.environ.get("INDEED_SESSION_KEY") or None
 
 
+def browser_channel() -> str | None:
+    """Playwright browser channel to drive: ``chrome`` / ``msedge`` / ``None``.
+
+    ``None`` (default) uses Playwright's bundled Chromium. Set
+    ``INDEED_BROWSER_CHANNEL=chrome`` to drive the real installed Google Chrome
+    instead — often enough to clear a Cloudflare managed challenge that the
+    bundled build loops on. This is the actual browser, not a stealth patch.
+    """
+    return os.environ.get("INDEED_BROWSER_CHANNEL") or None
+
+
 def ensure_dirs() -> None:
     """Create the writable directories the module expects. Safe to call repeatedly."""
     for p in (db_path().parent, session_enc_path().parent, runs_dir()):

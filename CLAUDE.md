@@ -283,6 +283,12 @@ then re-encrypts the now-cleared session so later headless commands reuse it.
 It never interacts with the challenge — no auto-click, no solver, no token
 injection.
 
+`--browser chrome|msedge` (env `INDEED_BROWSER_CHANNEL`) drives the real
+installed Chrome/Edge instead of Playwright's bundled Chromium. This is a
+legitimate browser choice, **not** fingerprint spoofing — no stealth args, no
+`navigator.webdriver` patching, no `--disable-blink-features`. It exists because
+the bundled build is more often caught in a Cloudflare managed-challenge loop.
+
 ## 7. Manual verification & failure handling
 
 - Detected challenge (CAPTCHA / OTP / email code / passkey / "verify it's

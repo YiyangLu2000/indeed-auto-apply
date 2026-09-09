@@ -87,6 +87,7 @@ cp profile.example.json profile.json # then edit with YOUR real data
 | `INDEED_DB_PATH`          | `data/applications.db`  | SQLite file |
 | `INDEED_PROFILE_PATH`     | `profile.json`          | candidate profile |
 | `INDEED_RUNS_DIR`         | `runs/`                 | screenshots + DOM on every stop |
+| `INDEED_BROWSER_CHANNEL`  | *(bundled Chromium)*    | `chrome` / `msedge` — drive your real browser (also `--browser`) |
 
 Key resolution order: `INDEED_SESSION_KEY` → `INDEED_SESSION_KEY_FILE` →
 `.secrets/session.key`.
@@ -196,11 +197,18 @@ it pauses.** The matcher is `apply_runner.resolve_answer` and is unit-tested in
 * **Anti-bot / "Request Blocked" wall** (Cloudflare 403, "verify you are
   human", "just a moment", Ray ID) → the command stops with a `blocked:` message
   (`select-jobs`) or `MANUAL_ACTION_REQUIRED` (mid-apply). The module **does not
-  bypass it**. Run `python -m indeed_apply unblock`: a visible browser opens on
-  Indeed with your session; you complete any human check yourself (or wait /
-  reload a hard block), press ENTER, and the cleared session is re-saved. Then
-  retry the command / `resume <job_id>`. If it's a hard IP block, wait or use a
-  different network (then re-run `login`).
+  bypass it**. Steps:
+  1. Confirm it's not just your IP: open the same Indeed URL in your normal
+     browser. If that's blocked too, wait it out or switch network, then re-run
+     `login`.
+  2. If your normal browser works, the bundled Chromium is being fingerprinted.
+     Re-run with `--browser chrome` (drives your real installed Chrome, not a
+     stealth patch), e.g. `python -m indeed_apply login --browser chrome` then
+     `select-jobs --browser chrome`. Set `INDEED_BROWSER_CHANNEL=chrome` to make
+     it the default.
+  3. `python -m indeed_apply unblock [--browser chrome]` — a visible browser
+     opens; complete any human check yourself, press ENTER, the cleared session
+     is re-saved. Then retry the command / `resume <job_id>`.
 * **Human handles the step** themselves (their own browser, `unblock`, or re-run
   `login`), then `python -m indeed_apply resume <job_id>`. `resume` is
   **idempotent** — if it stops again it just records `MANUAL_ACTION_REQUIRED`
