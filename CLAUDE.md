@@ -263,7 +263,8 @@ python -m indeed_apply keygen                 # create .secrets/session.key
 python -m indeed_apply login                  # headed browser; human logs in
 python -m indeed_apply capture-session        # store storage_state, encrypted
 python -m indeed_apply session-status         # present? age? valid?
-python -m indeed_apply select-jobs [--query .. --location .. --limit 5]
+python -m indeed_apply unblock                # visible browser; human clears an anti-bot wall, session re-saved
+python -m indeed_apply select-jobs [--query .. --location .. --limit 5] [--headed]
 python -m indeed_apply apply-all [--confirm] [--headless]
 python -m indeed_apply apply <job_id> [--confirm] [--headless]
 python -m indeed_apply resume <job_id> [--confirm] [--headless]
@@ -273,6 +274,14 @@ python -m indeed_apply status [--id N | --all]   # show apps + history
 `login` and `capture-session` may be one command with a "press Enter when
 done" pause. Default is **headed** and **no auto-submit** (`--confirm`
 required to actually send an application).
+
+`unblock` is the interactive form of the §7 anti-bot stop: when Indeed shows a
+"Request Blocked" / "verify you are human" / "just a moment" wall, the command
+opens a **visible** browser on Indeed with the restored session, waits for the
+human to clear the wall themselves (or wait out a hard block) and press Enter,
+then re-encrypts the now-cleared session so later headless commands reuse it.
+It never interacts with the challenge — no auto-click, no solver, no token
+injection.
 
 ## 7. Manual verification & failure handling
 

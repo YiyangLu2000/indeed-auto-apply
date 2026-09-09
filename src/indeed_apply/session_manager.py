@@ -220,14 +220,19 @@ async def capture(
             await page.wait_for_timeout(int(poll_seconds * 1000))
 
         print(f"Capturing session ({why})...")
-        state = await context.storage_state()
-        blob = _fernet().encrypt(json.dumps(state).encode())
-        out = config.session_enc_path()
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(blob)
-        out.chmod(0o600)
+        out = _write_encrypted(await context.storage_state())
         await browser.close()
     print(f"Session captured and encrypted -> {out}")
+    return out
+
+
+def _write_encrypted(state: dict) -> Path:
+    """Fernet-encrypt a storage_state dict to ``session.enc`` (mode 600)."""
+    blob = _fernet().encrypt(json.dumps(state).encode())
+    out = config.session_enc_path()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(blob)
+    out.chmod(0o600)
     return out
 
 
@@ -236,6 +241,74 @@ async def _safe_close(browser) -> None:
         await browser.close()
     except Exception:
         pass
+
+
+async def _await_enter(page, *, prompt: str, poll_ms: int = 500) -> None:
+    """Block until the operator presses ENTER (or ~2 min pass if stdin isn't a tty)."""
+    print(prompt)
+    if not sys.stdin.isatty():
+        await page.wait_for_timeout(120_000)
+        return
+    while True:
+        if select.select([sys.stdin], [], [], 0)[0]:
+            sys.stdin.readline()
+            return
+        await page.wait_for_timeout(poll_ms)
+
+
+async def manual_unblock(*, indeed_url: str | None = None, attempts: int = 5) -> Path:
+    """Open a **visible** browser so the human can clear an Indeed anti-bot wall.
+
+    Loads Indeed with the restored session. If a wall is showing, the operator
+    completes any "verify you are human" check themselves (or just waits / reloads
+    for a hard block) and presses ENTER. Once Indeed loads normally the session —
+    now carrying whatever clearance cookie the human earned — is re-encrypted so
+    later headless commands reuse it.
+
+    This never interacts with the challenge itself. Raises
+    :class:`ManualActionRequired` if still blocked after ``attempts`` rounds.
+    """
+    from playwright.async_api import async_playwright
+
+    config.ensure_dirs()
+    url = (indeed_url or config.INDEED_BASE_URL).rstrip("/") + "/"
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=False)
+        context = await browser.new_context(storage_state=restore())
+        page = await context.new_page()
+        try:
+            for n in range(1, attempts + 1):
+                try:
+                    resp = await page.goto(url, wait_until="domcontentloaded")
+                except Exception as exc:
+                    await _safe_close(browser)
+                    raise ManualActionRequired(
+                        f"could not load Indeed in the unblock window ({exc})"
+                    ) from exc
+                reason = await detect_block(page, resp)
+                if not reason:
+                    out = _write_encrypted(await context.storage_state())
+                    await browser.close()
+                    print(f"Indeed loaded normally — session re-saved -> {out}")
+                    return out
+                print(f"[{n}/{attempts}] anti-bot wall: {reason}")
+                await _await_enter(
+                    page,
+                    prompt=(
+                        "In the open window: complete any 'Verify you are human' "
+                        "check, or wait / reload if it's a hard block. Do only what "
+                        "the page itself offers — no more.\n"
+                        "Press ENTER here once the Indeed homepage looks normal "
+                        "(Ctrl+C to give up)."
+                    ),
+                )
+            await _safe_close(browser)
+            raise ManualActionRequired(
+                "still blocked after manual attempts — try again later or from a "
+                "different network"
+            )
+        finally:
+            await _safe_close(browser)
 
 
 def restore() -> dict:

@@ -114,6 +114,23 @@ async def _probe_validity():
             await browser.close()
 
 
+@app.command()
+def unblock() -> None:
+    """Open a visible browser so YOU can clear an Indeed anti-bot wall.
+
+    Use when another command reports a 'Request Blocked' / anti-bot wall. A
+    Chromium window opens with your restored session; complete any 'verify you
+    are human' check yourself (or wait / reload for a hard block), then press
+    ENTER. The cleared session is re-saved so later commands reuse it. This
+    never solves a challenge for you.
+    """
+    try:
+        asyncio.run(session_manager.manual_unblock())
+    except IndeedApplyError as exc:
+        typer.echo(f"error: {exc}")
+        raise typer.Exit(2)
+
+
 # --- job selection ----------------------------------------------------------------
 
 
@@ -136,9 +153,9 @@ def select_jobs_cmd(
     except ManualActionRequired as exc:
         typer.echo(f"blocked: {exc}")
         typer.echo(
-            "Indeed's anti-bot wall is up for this network. This module will not "
-            "bypass it. Options: wait and retry later, try `--headed`, or run from "
-            "a different network, then re-run `login` there."
+            "Indeed's anti-bot wall is up. This module will not bypass it. Run "
+            "`python -m indeed_apply unblock` to clear it yourself in a visible "
+            "browser, then retry — or wait / switch network."
         )
         raise typer.Exit(2)
     except IndeedApplyError as exc:

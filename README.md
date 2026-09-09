@@ -100,8 +100,9 @@ python -m indeed_apply keygen                 # create .secrets/session.key
 python -m indeed_apply login                  # headed browser: log in manually;
                                               #   session is captured + encrypted
 python -m indeed_apply session-status [--check]   # present? age? (--check probes Indeed)
+python -m indeed_apply unblock                    # visible browser to clear an anti-bot wall yourself
 
-python -m indeed_apply select-jobs [--query .. --location .. --limit 5]
+python -m indeed_apply select-jobs [--query .. --location .. --limit 5] [--headed]
 python -m indeed_apply apply-all [--confirm] [--headless]
 python -m indeed_apply apply  <job_id> [--confirm] [--headless]
 python -m indeed_apply resume <job_id> [--confirm] [--headless]
@@ -192,9 +193,18 @@ it pauses.** The matcher is `apply_runner.resolve_answer` and is unit-tested in
   clean non-zero exit. The CLI prints what to do.
 * **Session expired** on restore → `MANUAL_ACTION_REQUIRED` with reason
   "session expired — re-run login + capture-session". Do that, then `resume`.
-* **Human handles the step** themselves (their own browser, or re-run `login`),
-  then `python -m indeed_apply resume <job_id>`. `resume` is **idempotent** —
-  if it stops again it just records `MANUAL_ACTION_REQUIRED` again.
+* **Anti-bot / "Request Blocked" wall** (Cloudflare 403, "verify you are
+  human", "just a moment", Ray ID) → the command stops with a `blocked:` message
+  (`select-jobs`) or `MANUAL_ACTION_REQUIRED` (mid-apply). The module **does not
+  bypass it**. Run `python -m indeed_apply unblock`: a visible browser opens on
+  Indeed with your session; you complete any human check yourself (or wait /
+  reload a hard block), press ENTER, and the cleared session is re-saved. Then
+  retry the command / `resume <job_id>`. If it's a hard IP block, wait or use a
+  different network (then re-run `login`).
+* **Human handles the step** themselves (their own browser, `unblock`, or re-run
+  `login`), then `python -m indeed_apply resume <job_id>`. `resume` is
+  **idempotent** — if it stops again it just records `MANUAL_ACTION_REQUIRED`
+  again.
 * **Genuine error** (missing selector, timeout, upload failure) → `FAILED` with
   the exception summary. Terminal. No automatic retries; a human decides whether
   to recreate the row.
