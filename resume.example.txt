@@ -1,0 +1,5 @@
+Placeholder resume file.
+
+`profile.example.json` points `resume_path` here only so the example profile
+loads cleanly in tests. Your real `profile.json` should point at your actual
+resume PDF (an absolute path, or a path relative to the profile file).

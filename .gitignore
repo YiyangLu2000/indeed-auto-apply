@@ -1,0 +1,15 @@
+# secrets & local state
+.secrets/
+data/
+runs/
+profile.json
+.env
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/

@@ -1,0 +1,5 @@
+playwright==1.47.0
+cryptography==43.0.1
+typer==0.12.5
+click==8.1.7          # typer 0.12.x is incompatible with click >= 8.2
+pytest==8.3.3

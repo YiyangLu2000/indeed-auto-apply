@@ -1,0 +1,50 @@
+{
+  "contact": {
+    "name": "Jane Placeholder",
+    "email": "jane.placeholder@example.com",
+    "phone": "+1-555-0100",
+    "location": "Los Angeles, CA"
+  },
+  "resume_path": "resume.example.txt",
+  "work_experience": [
+    {
+      "title": "Backend Engineer",
+      "company": "Example Corp",
+      "start": "2022-06",
+      "end": "present",
+      "description": "Built and operated Python services on AWS."
+    },
+    {
+      "title": "Software Engineer Intern",
+      "company": "Sample Labs",
+      "start": "2021-05",
+      "end": "2021-08",
+      "description": "Internal tooling in Python and TypeScript."
+    }
+  ],
+  "education": [
+    {
+      "school": "University of Southern California",
+      "degree": "M.S.",
+      "field_of_study": "Computer Science",
+      "start": "2023-08",
+      "end": "2025-05"
+    }
+  ],
+  "answers": {
+    "Are you authorized to work in the United States?": "Yes",
+    "Will you now or in the future require sponsorship for employment visa status?": "No",
+    "How many years of professional software engineering experience do you have?": "3",
+    "What is your notice period?": "2 weeks",
+    "Are you willing to relocate?": "Yes",
+    "Do you have a bachelor's degree or higher?": "Yes"
+  },
+  "job_preferences": {
+    "titles": ["Backend Engineer", "Software Engineer", "Python Engineer"],
+    "location": "Los Angeles, CA",
+    "remote": true,
+    "min_salary": 120000,
+    "keywords_exclude": ["senior staff", "principal", "clearance"],
+    "limit": 5
+  }
+}
