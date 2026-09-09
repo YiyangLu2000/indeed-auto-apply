@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from . import config
 from .errors import ManualActionRequired
 from .profile import Profile
-from .session_manager import _CHALLENGE_TEXT_MARKERS, _CHALLENGE_URL_MARKERS
+from .session_manager import detect_block
 from .storage import Storage
 
 _CARD = "div.job_seen_beacon, div.cardOutline, [data-testid='slider_item']"
@@ -48,15 +48,10 @@ def _search_url(query: str, location: str) -> str:
     return f"{config.INDEED_BASE_URL}/jobs?" + urllib.parse.urlencode(params)
 
 
-async def _raise_if_challenge(page) -> None:
-    if any(m in page.url.lower() for m in _CHALLENGE_URL_MARKERS):
-        raise ManualActionRequired(f"anti-bot wall on job search: {page.url}")
-    try:
-        text = (await page.inner_text("body"))[:4000].lower()
-    except Exception:
-        return
-    if any(m in text for m in _CHALLENGE_TEXT_MARKERS):
-        raise ManualActionRequired("anti-bot / verification wall on job search")
+async def _raise_if_challenge(page, response=None) -> None:
+    reason = await detect_block(page, response)
+    if reason:
+        raise ManualActionRequired(f"job search blocked — {reason}")
 
 
 async def select_jobs(
@@ -83,8 +78,9 @@ async def select_jobs(
         for q in queries:
             if len(picked) >= cap:
                 break
-            await page.goto(_search_url(q, loc), wait_until="domcontentloaded")
-            await _raise_if_challenge(page)
+            resp = await page.goto(_search_url(q, loc), wait_until="domcontentloaded")
+            await _raise_if_challenge(page, resp)
+            await page.wait_for_timeout(1500)  # let the job cards hydrate
 
             cards = page.locator(_CARD)
             for i in range(await cards.count()):

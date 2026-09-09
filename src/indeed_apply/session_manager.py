@@ -36,14 +36,32 @@ _LOGIN_URL_MARKERS = (
     "/auth/",
 )
 
-#: URL / text fragments that mean "anti-bot or CAPTCHA wall" (not a plain expiry).
-_CHALLENGE_URL_MARKERS = ("/blocked", "challenge", "hcaptcha", "px-captcha")
+#: URL / text / title / HTTP-status signals for an anti-bot or CAPTCHA wall
+#: (Cloudflare "Request Blocked", PerimeterX, hCaptcha, "verify it's you", ...).
+#: These are NOT a plain session expiry — a human must act in a real browser.
+_CHALLENGE_URL_MARKERS = (
+    "/blocked", "challenge", "hcaptcha", "px-captcha", "captcha", "/sorry",
+)
+_CHALLENGE_TITLE_MARKERS = (
+    "blocked", "just a moment", "attention required", "access denied",
+    "pardon our interruption", "security check",
+)
 _CHALLENGE_TEXT_MARKERS = (
+    "request blocked",
+    "you have been blocked",
+    "why have i been blocked",
+    "your ray id for this request",
+    "cloudflare",
     "additional verification required",
     "verify you are a human",
+    "verify you're a human",
     "unusual traffic",
     "enable javascript and cookies to continue",
+    "checking your browser before accessing",
+    "complete the security check to access",
 )
+#: HTTP status codes Indeed/Cloudflare use for a block or JS challenge.
+_CHALLENGE_STATUS = frozenset({403, 429, 503})
 
 #: Cookies Indeed sets for *any* visitor — NOT evidence of a login.
 _ANON_COOKIES = ("CTK", "SURF", "CSRF", "INDEED_CSRF_TOKEN")
@@ -278,8 +296,10 @@ async def check_validity(context) -> tuple[bool, str]:
         cookie_ok = any(_live(n) for n in _AUTH_COOKIES)
 
         # 1. Homepage: challenge wall? explicit sign-out redirect?
-        await page.goto(config.INDEED_BASE_URL + "/", wait_until="domcontentloaded")
-        await _raise_if_challenge(page)
+        resp = await page.goto(
+            config.INDEED_BASE_URL + "/", wait_until="domcontentloaded"
+        )
+        await _raise_if_challenge(page, resp)
         if any(m in page.url.lower() for m in _LOGIN_URL_MARKERS):
             return False, f"homepage redirected to sign-in ({page.url})"
 
@@ -290,10 +310,10 @@ async def check_validity(context) -> tuple[bool, str]:
         gated_loaded = False
         for gated in _GATED_URLS:
             try:
-                await page.goto(gated, wait_until="domcontentloaded")
+                gresp = await page.goto(gated, wait_until="domcontentloaded")
             except Exception:
                 continue
-            await _raise_if_challenge(page)
+            await _raise_if_challenge(page, gresp)
             final = page.url.lower()
             if any(m in final for m in _LOGIN_URL_MARKERS):
                 return False, "session expired — Indeed bounced a signed-in page to sign-in"
@@ -316,16 +336,48 @@ async def check_validity(context) -> tuple[bool, str]:
         await page.close()
 
 
-async def _raise_if_challenge(page) -> None:
-    """Raise ManualActionRequired if the current page is an anti-bot / CAPTCHA wall."""
-    if any(m in page.url.lower() for m in _CHALLENGE_URL_MARKERS):
-        raise ManualActionRequired(f"anti-bot wall on session check: {page.url}")
+async def detect_block(page, response=None) -> str | None:
+    """Return a reason string if the current page is an anti-bot / CAPTCHA wall.
+
+    Checks, in order: HTTP status (403/429/503), URL fragment, page ``<title>``,
+    and visible body text. Returns ``None`` when the page looks normal. Purely
+    read-only — never touches the challenge.
+    """
     try:
-        body_text = (await page.inner_text("body"))[:4000].lower()
+        status = getattr(response, "status", None)
+        if callable(status):  # sync Response.status is a property, but be safe
+            status = status()
+        if status in _CHALLENGE_STATUS:
+            return f"HTTP {status} (anti-bot / rate-limit) at {page.url}"
     except Exception:
-        return
-    if any(m in body_text for m in _CHALLENGE_TEXT_MARKERS):
-        raise ManualActionRequired("anti-bot / verification wall on session check")
+        pass
+
+    url = (page.url or "").lower()
+    if any(m in url for m in _CHALLENGE_URL_MARKERS):
+        return f"anti-bot URL: {page.url}"
+
+    try:
+        title = ((await page.title()) or "").lower()
+    except Exception:
+        title = ""
+    if any(m in title for m in _CHALLENGE_TITLE_MARKERS):
+        return f"anti-bot page (title: {title!r})"
+
+    try:
+        body_text = (await page.inner_text("body"))[:6000].lower()
+    except Exception:
+        body_text = ""
+    hit = next((m for m in _CHALLENGE_TEXT_MARKERS if m in body_text), None)
+    if hit:
+        return f"anti-bot / verification wall (matched {hit!r})"
+    return None
+
+
+async def _raise_if_challenge(page, response=None, *, where: str = "session check") -> None:
+    """Raise :class:`ManualActionRequired` if the page is an anti-bot / CAPTCHA wall."""
+    reason = await detect_block(page, response)
+    if reason:
+        raise ManualActionRequired(f"{where}: {reason}")
 
 
 async def _any_visible(page, selectors) -> bool:

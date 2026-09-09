@@ -12,7 +12,7 @@ import asyncio
 import typer
 
 from . import config, session_manager
-from .errors import IndeedApplyError
+from .errors import IndeedApplyError, ManualActionRequired
 from .job_selector import JobPosting, select_jobs
 from .profile import load as load_profile
 from .state_machine import Status, is_terminal
@@ -122,12 +122,25 @@ def select_jobs_cmd(
     query: str = typer.Option(None, "--query"),
     location: str = typer.Option(None, "--location"),
     limit: int = typer.Option(None, "--limit"),
+    headed: bool = typer.Option(
+        False, "--headed", help="Show the browser (can help past an anti-bot block)."
+    ),
 ) -> None:
     """Search Indeed with the restored session; persist matches as PENDING rows."""
     storage = _storage()
     profile = load_profile()
     try:
-        postings = asyncio.run(_run_select(storage, profile, query, location, limit))
+        postings = asyncio.run(
+            _run_select(storage, profile, query, location, limit, headed)
+        )
+    except ManualActionRequired as exc:
+        typer.echo(f"blocked: {exc}")
+        typer.echo(
+            "Indeed's anti-bot wall is up for this network. This module will not "
+            "bypass it. Options: wait and retry later, try `--headed`, or run from "
+            "a different network, then re-run `login` there."
+        )
+        raise typer.Exit(2)
     except IndeedApplyError as exc:
         typer.echo(f"error: {exc}")
         raise typer.Exit(2)
@@ -147,13 +160,13 @@ def select_jobs_cmd(
     typer.echo(f"{len(postings)} posting(s) queued as PENDING")
 
 
-async def _run_select(storage, profile, query, location, limit):
+async def _run_select(storage, profile, query, location, limit, headed=False):
     from playwright.async_api import async_playwright
 
     from .session_manager import check_validity, restore
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
+        browser = await pw.chromium.launch(headless=not headed)
         try:
             context = await browser.new_context(storage_state=restore())
             ok, reason = await check_validity(context)

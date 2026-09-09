@@ -24,7 +24,7 @@ from . import config
 from .errors import ManualActionRequired, SessionExpired
 from .job_selector import JobPosting
 from .profile import Profile
-from .session_manager import check_validity, restore
+from .session_manager import check_validity, detect_block, restore
 from .state_machine import Status, is_terminal, transition
 from .storage import Application, Storage
 
@@ -171,7 +171,10 @@ async def _looks_like_captcha(page) -> bool:
                 return True
         except Exception:
             pass
-    return any(m in await _text(page) for m in _CAPTCHA_MARKERS_TEXT)
+    if any(m in await _text(page) for m in _CAPTCHA_MARKERS_TEXT):
+        return True
+    # Cloudflare "Request Blocked" / PerimeterX / "Just a moment" walls.
+    return bool(await detect_block(page))
 
 
 async def _looks_like_otp(page) -> bool:
