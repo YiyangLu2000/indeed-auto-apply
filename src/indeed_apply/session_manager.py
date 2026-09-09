@@ -15,6 +15,8 @@ This module is exercised manually against live Indeed; keep it thin.
 from __future__ import annotations
 
 import json
+import select
+import sys
 import time
 from pathlib import Path
 
@@ -43,19 +45,28 @@ _CHALLENGE_TEXT_MARKERS = (
     "enable javascript and cookies to continue",
 )
 
-#: Cookies Indeed sets only after a successful login.
-_AUTH_COOKIE_PRIMARY = "CTK"
-_AUTH_COOKIE_SECONDARY = ("SHOE", "PPID", "SURF")
+#: Cookies Indeed sets for *any* visitor — NOT evidence of a login.
+_ANON_COOKIES = ("CTK", "SURF", "CSRF", "INDEED_CSRF_TOKEN")
+#: Cookies that appear only after a successful login. ``PPID`` (persistent
+#: principal id) is the most reliable; ``SHOE`` rides along with an
+#: authenticated session.
+_AUTH_COOKIES = ("PPID", "SHOE")
 
-#: DOM markers on indeed.com/ that distinguish logged-in from logged-out.
+#: DOM markers on indeed.com/ that distinguish logged-in from logged-out. The
+#: logout link and the "My jobs" nav item only render for an authenticated user.
 _LOGGED_IN_SELECTORS = (
     '[data-gnav-element-name="AccountMenu"]',
+    '[data-gnav-element-name="Profile"]',
+    '[data-testid="gnav-AccountMenu"]',
     "#AccountMenu",
-    'a[href*="/account"][data-gnav-element-name]',
+    'button[aria-label*="Account" i]',
+    'a[href*="/account/logout"]',
+    'a[href*="myjobs"]',
 )
 _LOGGED_OUT_SELECTORS = (
     'a[data-gnav-element-name="SignIn"]',
     'a[href*="/account/login"]',
+    'a[href*="secure.indeed.com/auth"]',
 )
 
 
@@ -121,11 +132,22 @@ def age() -> float | None:
 # --- Capture / restore -----------------------------------------------------------
 
 
-async def capture(*, indeed_url: str | None = None, poll_seconds: float = 2.0) -> Path:
-    """Headed login capture. Blocks until a logged-in signal appears, then stores.
+async def capture(
+    *,
+    indeed_url: str | None = None,
+    poll_seconds: float = 1.5,
+    timeout_seconds: float = 900.0,
+) -> Path:
+    """Headed login capture.
 
-    Returns the path of the encrypted blob. Requires a display (headed Chromium)
-    and ``playwright install chromium`` to have been run.
+    Opens a visible Chromium on Indeed, then waits until **either** a logged-in
+    signal is detected (account menu / logout link in the DOM, or a post-login
+    cookie) **or** the operator presses ENTER in the terminal. Then it
+    serialises ``storage_state()``, encrypts it, and closes the browser.
+
+    Requires a display (headed Chromium) and ``playwright install chromium``.
+    Raises :class:`ConfigError` if the window is closed early or the wait times
+    out with no login.
     """
     from playwright.async_api import async_playwright
 
@@ -136,21 +158,50 @@ async def capture(*, indeed_url: str | None = None, poll_seconds: float = 2.0) -
         context = await browser.new_context()
         page = await context.new_page()
         await page.goto(url, wait_until="domcontentloaded")
-        print(
-            "A browser window is open. Log in to Indeed manually "
-            "(email + emailed passcode, dismiss any passkey prompt).\n"
-            "Waiting for a logged-in signal..."
-        )
-        try:
-            while True:
-                ok, reason = await _inspect_logged_in(context, page)
-                if ok:
-                    break
-                await page.wait_for_timeout(int(poll_seconds * 1000))
-        except KeyboardInterrupt:  # pragma: no cover - operator abort
-            await browser.close()
-            raise
 
+        print(
+            "\nA Chromium window is open on Indeed.\n"
+            "  1. Click 'Sign in' and log in (email + the emailed 6-digit code).\n"
+            "  2. Dismiss any 'add a passkey' / 'save your info' prompt.\n"
+            "  3. Wait until your avatar/initial shows at the top-right.\n"
+            "\nCapture happens automatically once the login is detected — or press\n"
+            "ENTER in this terminal to capture the current session immediately.\n"
+        )
+        can_prompt = sys.stdin.isatty()
+        deadline = time.monotonic() + timeout_seconds
+        why = "detected"
+        while True:
+            try:
+                ok, reason = await _inspect_logged_in(context, page)
+            except Exception as exc:  # window closed / navigation died
+                await _safe_close(browser)
+                raise ConfigError(
+                    f"the login window went away before capture ({exc}); re-run `login`"
+                ) from exc
+            if ok:
+                why = reason
+                break
+            if can_prompt and select.select([sys.stdin], [], [], 0)[0]:
+                sys.stdin.readline()
+                recheck, _ = await _inspect_logged_in(context, page)
+                if recheck:
+                    why = "operator-confirmed + detected"
+                else:
+                    why = "operator-confirmed (no login signal seen)"
+                    print(
+                        "! Could not confirm a logged-in state from the page. "
+                        "Capturing anyway — run `session-status --check` to verify."
+                    )
+                break
+            if time.monotonic() > deadline:
+                await _safe_close(browser)
+                raise ConfigError(
+                    "timed out waiting for login; re-run `login` and finish the "
+                    "Indeed sign-in in the opened window"
+                )
+            await page.wait_for_timeout(int(poll_seconds * 1000))
+
+        print(f"Capturing session ({why})...")
         state = await context.storage_state()
         blob = _fernet().encrypt(json.dumps(state).encode())
         out = config.session_enc_path()
@@ -160,6 +211,13 @@ async def capture(*, indeed_url: str | None = None, poll_seconds: float = 2.0) -
         await browser.close()
     print(f"Session captured and encrypted -> {out}")
     return out
+
+
+async def _safe_close(browser) -> None:
+    try:
+        await browser.close()
+    except Exception:
+        pass
 
 
 def restore() -> dict:
@@ -212,7 +270,7 @@ async def check_validity(context) -> tuple[bool, str]:
         if any(m in landing for m in _LOGIN_URL_MARKERS):
             return False, f"redirected to login ({page.url})"
 
-        # 3. Cookie signal.
+        # 3. Cookie signal (advisory — the DOM in step 4 decides).
         cookies = {c["name"]: c for c in await context.cookies()}
         now = time.time()
 
@@ -223,9 +281,7 @@ async def check_validity(context) -> tuple[bool, str]:
             exp = c.get("expires", -1)
             return exp in (-1, 0) or exp > now
 
-        has_primary = _live(_AUTH_COOKIE_PRIMARY)
-        has_secondary = any(_live(n) for n in _AUTH_COOKIE_SECONDARY)
-        cookie_ok = has_primary and has_secondary
+        cookie_ok = any(_live(n) for n in _AUTH_COOKIES)
 
         # 4. DOM signal — authoritative.
         dom_logged_out = await _any_visible(page, _LOGGED_OUT_SELECTORS)
@@ -254,9 +310,10 @@ async def check_validity(context) -> tuple[bool, str]:
 
 
 async def _any_visible(page, selectors) -> bool:
+    """True if any selector matches a currently-visible element. Returns fast."""
     for sel in selectors:
         try:
-            if await page.locator(sel).first.is_visible(timeout=2500):
+            if await page.locator(sel).first.is_visible():
                 return True
         except Exception:
             continue
@@ -264,18 +321,22 @@ async def _any_visible(page, selectors) -> bool:
 
 
 async def _inspect_logged_in(context, page) -> tuple[bool, str]:
-    """Lightweight check used while polling during capture()."""
+    """Lightweight logged-in check used while polling during capture().
+
+    DOM marker is authoritative; a post-login cookie is accepted as a fallback
+    for when Indeed changes its nav markup. Anonymous cookies (``CTK``,
+    ``SURF``, ...) are deliberately ignored — every visitor has those.
+    """
     try:
         if await _any_visible(page, _LOGGED_IN_SELECTORS):
-            return True, "account menu visible"
-        cookies = {c["name"] for c in await context.cookies()}
-        if _AUTH_COOKIE_PRIMARY in cookies and (
-            cookies & set(_AUTH_COOKIE_SECONDARY)
-        ):
-            return True, "auth cookies set"
+            return True, "account menu / logout link visible"
+        names = {c["name"] for c in await context.cookies()}
+        hit = [n for n in _AUTH_COOKIES if n in names]
+        if hit:
+            return True, f"post-login cookie present ({', '.join(hit)})"
     except Exception:
         pass
-    return False, "not yet"
+    return False, "not logged in yet"
 
 
 def require_valid_or_raise(ok: bool, reason: str) -> None:
