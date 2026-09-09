@@ -238,39 +238,33 @@ def restore() -> dict:
 # --- Validity probe (CLAUDE.md §5.1) --------------------------------------------
 
 
+#: Login-gated Indeed surfaces. Visiting one of these while signed out
+#: redirects to ``secure.indeed.com/auth``; while signed in it just loads.
+_GATED_URLS = (
+    "https://myjobs.indeed.com/",
+    "https://profile.indeed.com/",
+)
+
+
 async def check_validity(context) -> tuple[bool, str]:
     """Read-only probe: is this restored context still logged in to Indeed?
 
-    Returns ``(True, "ok")`` only when the homepage shows a logged-in DOM
-    marker. Returns ``(False, reason)`` for a plain expiry / logged-out state
-    (caller: tell the human to re-run ``login`` + ``capture-session``). Raises
-    :class:`ManualActionRequired` if Indeed shows an anti-bot / CAPTCHA wall
-    here — that needs a human in a headed browser, not just a fresh capture.
+    Authoritative signal is a **login-gated page** (``myjobs.indeed.com`` /
+    ``profile.indeed.com``): signed out, Indeed bounces it to
+    ``secure.indeed.com/auth``; signed in, it just loads. This is used instead
+    of scraping the homepage nav, which changes markup often. The homepage DOM
+    marker and the auth cookie are only fast hints / tie-breakers.
+
+    Returns ``(True, "ok")`` when a gated page loads without a sign-in bounce.
+    Returns ``(False, reason)`` for a plain expiry (caller: re-run ``login``).
+    Raises :class:`ManualActionRequired` on an anti-bot / CAPTCHA wall — that
+    needs a human in a headed browser, not just a fresh capture.
 
     Never interacts with a challenge; only navigates and inspects.
     """
     page = await context.new_page()
     try:
-        await page.goto(config.INDEED_BASE_URL + "/", wait_until="domcontentloaded")
-        landing = page.url.lower()
-
-        # 1. Challenge wall? -> not a normal expiry.
-        if any(m in landing for m in _CHALLENGE_URL_MARKERS):
-            raise ManualActionRequired(f"anti-bot wall on session check: {page.url}")
-        try:
-            body_text = (await page.inner_text("body"))[:4000].lower()
-        except Exception:
-            body_text = ""
-        if any(m in body_text for m in _CHALLENGE_TEXT_MARKERS):
-            raise ManualActionRequired(
-                "anti-bot / verification wall on session check"
-            )
-
-        # 2. Login URL redirect?
-        if any(m in landing for m in _LOGIN_URL_MARKERS):
-            return False, f"redirected to login ({page.url})"
-
-        # 3. Cookie signal (advisory — the DOM in step 4 decides).
+        # 0. Cookie hint (advisory only).
         cookies = {c["name"]: c for c in await context.cookies()}
         now = time.time()
 
@@ -283,30 +277,55 @@ async def check_validity(context) -> tuple[bool, str]:
 
         cookie_ok = any(_live(n) for n in _AUTH_COOKIES)
 
-        # 4. DOM signal — authoritative.
+        # 1. Homepage: challenge wall? explicit sign-out redirect?
+        await page.goto(config.INDEED_BASE_URL + "/", wait_until="domcontentloaded")
+        await _raise_if_challenge(page)
+        if any(m in page.url.lower() for m in _LOGIN_URL_MARKERS):
+            return False, f"homepage redirected to sign-in ({page.url})"
+
         dom_logged_out = await _any_visible(page, _LOGGED_OUT_SELECTORS)
         dom_logged_in = await _any_visible(page, _LOGGED_IN_SELECTORS)
 
-        if dom_logged_out and not dom_logged_in:
-            return False, "Indeed shows a signed-out homepage (session stale)"
-        if not dom_logged_in:
-            if not cookie_ok:
-                return False, "no live auth cookie and no logged-in marker"
-            return False, "auth cookie present but no logged-in marker on homepage"
+        # 2. Authoritative: does a login-gated page load, or bounce to /auth?
+        gated_loaded = False
+        for gated in _GATED_URLS:
+            try:
+                await page.goto(gated, wait_until="domcontentloaded")
+            except Exception:
+                continue
+            await _raise_if_challenge(page)
+            final = page.url.lower()
+            if any(m in final for m in _LOGIN_URL_MARKERS):
+                return False, "session expired — Indeed bounced a signed-in page to sign-in"
+            if gated.split("//", 1)[1].split("/", 1)[0] in final:
+                gated_loaded = True
+                break
 
-        # 5. Corroborate on a profile-gated page.
-        try:
-            await page.goto(
-                "https://myjobs.indeed.com/applied", wait_until="domcontentloaded"
-            )
-            if any(m in page.url.lower() for m in _LOGIN_URL_MARKERS):
-                return False, "profile page redirected to login"
-        except Exception:
-            pass  # corroboration only; homepage marker already said logged-in
+        if gated_loaded:
+            return True, "ok"
 
-        return True, "ok"
+        # 3. Gated probe inconclusive — fall back to homepage hints.
+        if dom_logged_in and not dom_logged_out:
+            return True, "ok (via homepage account marker)"
+        if cookie_ok and not dom_logged_out:
+            return True, "ok (via auth cookie; gated pages unreachable)"
+        if dom_logged_out:
+            return False, "Indeed shows a signed-out homepage"
+        return False, "could not confirm a logged-in session"
     finally:
         await page.close()
+
+
+async def _raise_if_challenge(page) -> None:
+    """Raise ManualActionRequired if the current page is an anti-bot / CAPTCHA wall."""
+    if any(m in page.url.lower() for m in _CHALLENGE_URL_MARKERS):
+        raise ManualActionRequired(f"anti-bot wall on session check: {page.url}")
+    try:
+        body_text = (await page.inner_text("body"))[:4000].lower()
+    except Exception:
+        return
+    if any(m in body_text for m in _CHALLENGE_TEXT_MARKERS):
+        raise ManualActionRequired("anti-bot / verification wall on session check")
 
 
 async def _any_visible(page, selectors) -> bool:
