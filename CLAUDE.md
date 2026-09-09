@@ -264,7 +264,8 @@ python -m indeed_apply login                  # headed browser; human logs in
 python -m indeed_apply capture-session        # store storage_state, encrypted
 python -m indeed_apply session-status         # present? age? valid?
 python -m indeed_apply unblock                # visible browser; human clears an anti-bot wall, session re-saved
-python -m indeed_apply select-jobs [--query .. --location .. --limit 5] [--headed]
+python -m indeed_apply chrome-debug           # launch real Chrome w/ remote debugging for --attach
+python -m indeed_apply select-jobs [--query .. --location .. --limit 5] [--headed] [--attach]
 python -m indeed_apply apply-all [--confirm] [--headless]
 python -m indeed_apply apply <job_id> [--confirm] [--headless]
 python -m indeed_apply resume <job_id> [--confirm] [--headless]
@@ -288,6 +289,19 @@ installed Chrome/Edge instead of Playwright's bundled Chromium. This is a
 legitimate browser choice, **not** fingerprint spoofing — no stealth args, no
 `navigator.webdriver` patching, no `--disable-blink-features`. It exists because
 the bundled build is more often caught in a Cloudflare managed-challenge loop.
+
+`chrome-debug` + `--attach` is the strongest in-bounds option when Cloudflare
+blocks a *launched* browser outright. `chrome-debug` starts the operator's real
+Chrome with `--remote-debugging-port` and a dedicated profile
+(`.secrets/chrome-attach-profile/`; cookies encrypted at rest by Chrome Safe
+Storage / Keychain). The human signs in and clears any check **in that window
+themselves**. `select-jobs --attach` / `apply <id> --attach` then
+`connect_over_cdp` to that same live session and drive it. Because Chrome was
+launched normally (no `--enable-automation`), `navigator.webdriver` is false and
+Cloudflare treats it as the real browser it is. Still **no** stealth/evasion —
+the module only attaches to a browser the human already got through. After an
+`--attach` run the current cookies are snapshotted and Fernet-encrypted to
+`session.enc` so the other commands keep working.
 
 ## 7. Manual verification & failure handling
 

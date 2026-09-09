@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+import subprocess
+from pathlib import Path
 
 import typer
 
@@ -37,6 +40,29 @@ def _use_browser(channel: str | None) -> None:
     """Route --browser into the env var every launch helper reads."""
     if channel:
         os.environ["INDEED_BROWSER_CHANNEL"] = channel
+
+
+_ATTACH_OPT = typer.Option(
+    False,
+    "--attach",
+    help="Drive the Chrome you started with `chrome-debug` (your real, signed-in "
+    "session) instead of launching a fresh browser.",
+)
+
+_CHROME_CANDIDATES = (
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+)
+
+
+def _find_chrome() -> str | None:
+    if config.chrome_bin():
+        return config.chrome_bin()
+    for c in _CHROME_CANDIDATES:
+        if Path(c).exists():
+            return c
+    return shutil.which("google-chrome") or shutil.which("chromium")
 
 
 def _storage() -> Storage:
@@ -98,19 +124,25 @@ def session_status(
         False, "--check", help="Launch a headless browser and probe Indeed for validity."
     ),
     browser: str = _BROWSER_OPT,
+    attach: bool = _ATTACH_OPT,
 ) -> None:
     """Report whether a captured session is present, its age, and (optionally) validity."""
     _use_browser(browser)
-    if not session_manager.is_present():
+    if attach:
+        typer.echo("session: (attached Chrome — see chrome-debug window)")
+    elif not session_manager.is_present():
         typer.echo("session: MISSING — run `login`")
         raise typer.Exit(1)
-    secs = session_manager.age() or 0
-    typer.echo(f"session: present, age {secs / 3600:.1f}h ({config.session_enc_path()})")
+    else:
+        secs = session_manager.age() or 0
+        typer.echo(
+            f"session: present, age {secs / 3600:.1f}h ({config.session_enc_path()})"
+        )
     if not check:
         typer.echo("validity: not checked (pass --check)")
         return
     try:
-        ok, reason = asyncio.run(_probe_validity())
+        ok, reason = asyncio.run(_probe_validity(attach))
     except IndeedApplyError as exc:
         typer.echo(f"validity: MANUAL ACTION — {exc}")
         raise typer.Exit(2)
@@ -118,18 +150,24 @@ def session_status(
     raise typer.Exit(0 if ok else 3)
 
 
-async def _probe_validity():
+async def _probe_validity(attach=False):
     from playwright.async_api import async_playwright
 
-    from .session_manager import check_validity, launch_chromium, restore
+    from .session_manager import check_validity, connect_cdp, launch_chromium, restore
 
     async with async_playwright() as pw:
-        browser = await launch_chromium(pw, headless=True)
-        try:
+        if attach:
+            browser, context = await connect_cdp(pw)
+            own_browser = False
+        else:
+            browser = await launch_chromium(pw, headless=True)
             context = await browser.new_context(storage_state=restore())
+            own_browser = True
+        try:
             return await check_validity(context)
         finally:
-            await browser.close()
+            if own_browser:
+                await browser.close()
 
 
 @app.command()
@@ -152,6 +190,58 @@ def unblock(browser: str = _BROWSER_OPT) -> None:
         raise typer.Exit(2)
 
 
+@app.command("chrome-debug")
+def chrome_debug(
+    port: int = typer.Option(9222, "--port"),
+    url: str = typer.Option("https://www.indeed.com", "--url"),
+) -> None:
+    """Launch your real Chrome with remote debugging, for `--attach` mode.
+
+    Opens Chrome with a dedicated profile (``.secrets/chrome-attach-profile``,
+    git-ignored; cookies encrypted at rest by Chrome Safe Storage). **In that
+    window: sign into Indeed and clear any 'verify you are human' check
+    yourself.** Then run e.g. `select-jobs --attach` / `apply <id> --attach` and
+    the module drives that same session — a real browser, nothing spoofed.
+
+    Leave the window open while you use `--attach` commands.
+    """
+    chrome = _find_chrome()
+    if not chrome:
+        typer.echo(
+            "could not find Chrome. Set INDEED_CHROME_BIN to its path "
+            "(e.g. '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')."
+        )
+        raise typer.Exit(1)
+    profile = config.chrome_attach_profile_dir()
+    profile.mkdir(parents=True, exist_ok=True)
+    args = [
+        chrome,
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={profile}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        url,
+    ]
+    try:
+        proc = subprocess.Popen(
+            args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    except OSError as exc:
+        typer.echo(f"could not launch Chrome: {exc}")
+        raise typer.Exit(1)
+    os.environ["INDEED_CDP_URL"] = f"http://localhost:{port}"
+    typer.echo(f"Chrome launched (pid {proc.pid}) — debug port {port}, profile {profile}")
+    typer.echo("In that window: sign into Indeed and pass any Cloudflare check.")
+    typer.echo(
+        f"Then, with the window left open:\n"
+        f"  python -m indeed_apply session-status --check --attach\n"
+        f"  python -m indeed_apply select-jobs --attach\n"
+        f"  python -m indeed_apply apply <id> --attach [--confirm]"
+    )
+    if port != 9222:
+        typer.echo(f"(non-default port: prefix commands with INDEED_CDP_URL=http://localhost:{port})")
+
+
 # --- job selection ----------------------------------------------------------------
 
 
@@ -164,6 +254,7 @@ def select_jobs_cmd(
         False, "--headed", help="Show the browser (can help past an anti-bot block)."
     ),
     browser: str = _BROWSER_OPT,
+    attach: bool = _ATTACH_OPT,
 ) -> None:
     """Search Indeed with the restored session; persist matches as PENDING rows."""
     _use_browser(browser)
@@ -171,14 +262,14 @@ def select_jobs_cmd(
     profile = load_profile()
     try:
         postings = asyncio.run(
-            _run_select(storage, profile, query, location, limit, headed)
+            _run_select(storage, profile, query, location, limit, headed, attach)
         )
     except ManualActionRequired as exc:
         typer.echo(f"blocked: {exc}")
         typer.echo(
-            "Indeed's anti-bot wall is up. This module will not bypass it. Run "
-            "`python -m indeed_apply unblock` to clear it yourself in a visible "
-            "browser, then retry — or wait / switch network."
+            "Indeed's anti-bot wall is up. This module will not bypass it. "
+            "Either run `chrome-debug`, sign in + clear the check in that window, "
+            "and retry with `--attach`; or `unblock`; or wait / switch network."
         )
         raise typer.Exit(2)
     except IndeedApplyError as exc:
@@ -200,24 +291,47 @@ def select_jobs_cmd(
     typer.echo(f"{len(postings)} posting(s) queued as PENDING")
 
 
-async def _run_select(storage, profile, query, location, limit, headed=False):
+async def _run_select(storage, profile, query, location, limit, headed=False, attach=False):
     from playwright.async_api import async_playwright
 
-    from .session_manager import check_validity, launch_chromium, restore
+    from .session_manager import (
+        check_validity,
+        connect_cdp,
+        launch_chromium,
+        restore,
+        snapshot_and_encrypt,
+    )
 
     async with async_playwright() as pw:
-        browser = await launch_chromium(pw, headless=not headed)
-        try:
+        if attach:
+            browser, context = await connect_cdp(pw)
+            own_browser = False
+        else:
+            browser = await launch_chromium(pw, headless=not headed)
             context = await browser.new_context(storage_state=restore())
+            own_browser = True
+        try:
             ok, reason = await check_validity(context)
             if not ok:
-                typer.echo(f"session invalid ({reason}) — re-run login + capture-session")
+                hint = (
+                    "sign in again in the chrome-debug window"
+                    if attach
+                    else "re-run login + capture-session"
+                )
+                typer.echo(f"session invalid ({reason}) — {hint}")
                 raise typer.Exit(3)
-            return await select_jobs(
+            result = await select_jobs(
                 context, profile, storage, query=query, location=location, limit=limit
             )
+            if attach:
+                try:
+                    snapshot_and_encrypt(await context.storage_state())
+                except Exception:
+                    pass  # best-effort; the attached session is the source of truth
+            return result
         finally:
-            await browser.close()
+            if own_browser:
+                await browser.close()
 
 
 # --- apply ----------------------------------------------------------------------------
@@ -228,6 +342,7 @@ def apply_all(
     confirm: bool = typer.Option(False, "--confirm", help="Actually submit applications."),
     headless: bool = typer.Option(False, "--headless"),
     browser: str = _BROWSER_OPT,
+    attach: bool = _ATTACH_OPT,
 ) -> None:
     """Run the apply flow for every PENDING application row."""
     _use_browser(browser)
@@ -240,7 +355,7 @@ def apply_all(
     for row in pending:
         typer.echo(f"--- applying [{row.id}] {row.title} @ {row.company}")
         asyncio.run(
-            _apply_one(storage, _job_from_row(row), profile, confirm, headless)
+            _apply_one(storage, _job_from_row(row), profile, confirm, headless, attach)
         )
 
 
@@ -250,6 +365,7 @@ def apply(
     confirm: bool = typer.Option(False, "--confirm"),
     headless: bool = typer.Option(False, "--headless"),
     browser: str = _BROWSER_OPT,
+    attach: bool = _ATTACH_OPT,
 ) -> None:
     """Run the apply flow for one application row."""
     _use_browser(browser)
@@ -262,7 +378,9 @@ def apply(
         typer.echo(f"application {job_id} is already {row.status}")
         raise typer.Exit(0)
     profile = load_profile()
-    asyncio.run(_apply_one(storage, _job_from_row(row), profile, confirm, headless))
+    asyncio.run(
+        _apply_one(storage, _job_from_row(row), profile, confirm, headless, attach)
+    )
 
 
 @app.command()
@@ -271,6 +389,7 @@ def resume(
     confirm: bool = typer.Option(False, "--confirm"),
     headless: bool = typer.Option(False, "--headless"),
     browser: str = _BROWSER_OPT,
+    attach: bool = _ATTACH_OPT,
 ) -> None:
     """Resume a MANUAL_ACTION_REQUIRED application. Idempotent."""
     from . import apply_runner
@@ -280,7 +399,11 @@ def resume(
     try:
         result = asyncio.run(
             apply_runner.resume(
-                job_id, storage=storage, confirm=confirm, headless=headless
+                job_id,
+                storage=storage,
+                confirm=confirm,
+                headless=headless,
+                attach=attach,
             )
         )
     except (IndeedApplyError, KeyError) as exc:
@@ -289,12 +412,17 @@ def resume(
     typer.echo(f"application {job_id}: {result.status}")
 
 
-async def _apply_one(storage, job, profile, confirm, headless):
+async def _apply_one(storage, job, profile, confirm, headless, attach=False):
     from . import apply_runner
 
     try:
         result = await apply_runner.apply(
-            job, profile, storage=storage, confirm=confirm, headless=headless
+            job,
+            profile,
+            storage=storage,
+            confirm=confirm,
+            headless=headless,
+            attach=attach,
         )
         typer.echo(f"    -> {result.status}"
                    + (f" ({result.manual_reason})" if result.manual_reason else ""))

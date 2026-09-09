@@ -24,7 +24,14 @@ from . import config
 from .errors import ManualActionRequired, SessionExpired
 from .job_selector import JobPosting
 from .profile import Profile
-from .session_manager import check_validity, detect_block, launch_chromium, restore
+from .session_manager import (
+    check_validity,
+    connect_cdp,
+    detect_block,
+    launch_chromium,
+    restore,
+    snapshot_and_encrypt,
+)
 from .state_machine import Status, is_terminal, transition
 from .storage import Application, Storage
 
@@ -239,6 +246,7 @@ async def apply(
     storage: Storage | None = None,
     confirm: bool = False,
     headless: bool = False,
+    attach: bool = False,
 ) -> Application:
     """Apply to one job. Returns the final application row for this run."""
     storage = storage or Storage()
@@ -264,7 +272,9 @@ async def apply(
         app = transition(storage, app, Status.IN_PROGRESS, "apply: retry after manual")
     # IN_PROGRESS already -> just continue
 
-    return await _drive(storage, app, job, profile, confirm=confirm, headless=headless)
+    return await _drive(
+        storage, app, job, profile, confirm=confirm, headless=headless, attach=attach
+    )
 
 
 async def resume(
@@ -273,6 +283,7 @@ async def resume(
     storage: Storage | None = None,
     confirm: bool = False,
     headless: bool = False,
+    attach: bool = False,
 ) -> Application:
     """Resume a paused application. Idempotent — safe to call again if it re-stops."""
     storage = storage or Storage()
@@ -300,7 +311,9 @@ async def resume(
         indeed_apply=True,
     )
     profile = _load_profile()
-    return await _drive(storage, app, job, profile, confirm=confirm, headless=headless)
+    return await _drive(
+        storage, app, job, profile, confirm=confirm, headless=headless, attach=attach
+    )
 
 
 def _load_profile() -> Profile:
@@ -320,6 +333,7 @@ async def _drive(
     *,
     confirm: bool,
     headless: bool,
+    attach: bool = False,
 ) -> Application:
     from playwright.async_api import async_playwright
 
@@ -327,8 +341,13 @@ async def _drive(
     page = None
     try:
         async with async_playwright() as pw:
-            browser = await launch_chromium(pw, headless=headless)
-            context = await browser.new_context(storage_state=restore())
+            if attach:
+                browser, context = await connect_cdp(pw)
+                own_browser = False
+            else:
+                browser = await launch_chromium(pw, headless=headless)
+                context = await browser.new_context(storage_state=restore())
+                own_browser = True
             try:
                 ok, reason = await check_validity(context)
                 if not ok:
@@ -348,11 +367,16 @@ async def _drive(
                         storage, app, Status.SUBMITTED, "submitted and confirmed"
                     )
                     print(f"[submitted] {job.job_key}")
+                    if attach:
+                        await _snapshot(context)
                     return result
                 await _dump(page, app.id, "review")
+                if attach:
+                    await _snapshot(context)
                 raise ManualActionRequired("awaiting human submit at review screen")
             finally:
-                await browser.close()
+                if own_browser:
+                    await browser.close()
     except ManualActionRequired as exc:
         if page is not None:
             await _safe_dump(page, app.id, "manual")
@@ -380,6 +404,14 @@ async def _drive(
 async def _safe_dump(page, job_id: int, tag: str) -> None:
     try:
         await _dump(page, job_id, tag)
+    except Exception:
+        pass
+
+
+async def _snapshot(context) -> None:
+    """Best-effort: keep an encrypted copy of the attached session's cookies."""
+    try:
+        snapshot_and_encrypt(await context.storage_state())
     except Exception:
         pass
 

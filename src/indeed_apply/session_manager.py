@@ -263,6 +263,39 @@ async def launch_chromium(pw, *, headless: bool):
     return await pw.chromium.launch(headless=headless)
 
 
+async def connect_cdp(pw, *, cdp_url: str | None = None):
+    """Attach to a Chrome the human launched themselves, via DevTools (``--attach``).
+
+    Paired with ``chrome-debug``: the operator runs their real Chrome with
+    ``--remote-debugging-port``, signs in and clears any Cloudflare check in that
+    window, and the module drives that same live session. Nothing is spoofed —
+    it is a real browser under human control. Returns ``(browser, context)``
+    using the browser's existing (default) context; **the caller must not close
+    the browser** (it's the user's).
+    """
+    url = cdp_url or config.cdp_url()
+    try:
+        browser = await pw.chromium.connect_over_cdp(url)
+    except Exception as exc:
+        raise ConfigError(
+            f"could not attach to Chrome at {url} ({exc}). Start it first with "
+            "`python -m indeed_apply chrome-debug`, sign in there, then retry."
+        ) from exc
+    if not browser.contexts:
+        await _safe_close(browser)
+        raise ConfigError("attached to Chrome, but it has no open window")
+    return browser, browser.contexts[0]
+
+
+def snapshot_and_encrypt(state: dict) -> Path:
+    """Fernet-encrypt a ``storage_state`` snapshot to ``session.enc``.
+
+    Used after an ``--attach`` run so ``session-status`` and non-attach commands
+    still have an encrypted copy of the current cookies.
+    """
+    return _write_encrypted(state)
+
+
 async def _await_enter(page, *, prompt: str, poll_ms: int = 500) -> None:
     """Block until the operator presses ENTER (or ~2 min pass if stdin isn't a tty)."""
     print(prompt)

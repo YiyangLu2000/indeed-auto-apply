@@ -68,6 +68,21 @@ def browser_channel() -> str | None:
     return os.environ.get("INDEED_BROWSER_CHANNEL") or None
 
 
+def cdp_url() -> str:
+    """DevTools endpoint for ``--attach`` mode. Override with ``INDEED_CDP_URL``."""
+    return os.environ.get("INDEED_CDP_URL") or "http://localhost:9222"
+
+
+def chrome_bin() -> str | None:
+    """Explicit Chrome executable for ``chrome-debug`` (``INDEED_CHROME_BIN``)."""
+    return os.environ.get("INDEED_CHROME_BIN") or None
+
+
+def chrome_attach_profile_dir() -> Path:
+    """Dedicated profile dir for the ``chrome-debug`` browser. git-ignored."""
+    return _path("INDEED_CHROME_PROFILE_DIR", ".secrets/chrome-attach-profile")
+
+
 def ensure_dirs() -> None:
     """Create the writable directories the module expects. Safe to call repeatedly."""
     for p in (db_path().parent, session_enc_path().parent, runs_dir()):
