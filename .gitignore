@@ -3,6 +3,8 @@
 data/
 runs/
 profile.json
+# real resume / personal docs referenced by profile.json
+assets/
 .env
 
 # python

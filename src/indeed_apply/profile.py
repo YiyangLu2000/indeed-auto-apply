@@ -152,43 +152,55 @@ def _require(obj: dict, key: str, typ: type) -> Any:
     return value
 
 
-def _require_str(obj: dict, key: str, *, context: str) -> str:
-    value = obj.get(key)
-    if not isinstance(value, str) or not value.strip():
-        raise ProfileError(f"{context}: missing required string field {key!r}")
-    return value.strip()
+def _opt_str(obj: dict, *keys: str) -> str:
+    """First present, non-empty string among ``keys`` (accepts field-name aliases)."""
+    for k in keys:
+        v = obj.get(k)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    return ""
+
+
+def _require_str(obj: dict, key: str, *aliases: str, context: str) -> str:
+    value = _opt_str(obj, key, *aliases)
+    if not value:
+        shown = " / ".join((key, *aliases))
+        raise ProfileError(f"{context}: missing required string field {shown!r}")
+    return value
 
 
 def _parse_contact(obj: dict) -> Contact:
     return Contact(
-        name=_require_str(obj, "name", context="contact"),
+        name=_require_str(obj, "name", "full_name", context="contact"),
         email=_require_str(obj, "email", context="contact"),
-        phone=str(obj.get("phone", "")).strip(),
-        location=str(obj.get("location", "")).strip(),
+        phone=_opt_str(obj, "phone"),
+        location=_opt_str(obj, "location"),
     )
 
 
 def _parse_work(obj: Any, idx: int) -> WorkExperience:
     if not isinstance(obj, dict):
         raise ProfileError(f"work_experience[{idx}] must be an object")
+    ctx = f"work_experience[{idx}]"
     return WorkExperience(
-        title=_require_str(obj, "title", context=f"work_experience[{idx}]"),
-        company=_require_str(obj, "company", context=f"work_experience[{idx}]"),
-        start=str(obj.get("start", "")).strip(),
-        end=str(obj.get("end", "")).strip(),
-        description=str(obj.get("description", "")).strip(),
+        title=_require_str(obj, "title", "role", context=ctx),
+        company=_require_str(obj, "company", "employer", context=ctx),
+        start=_opt_str(obj, "start", "start_date"),
+        end=_opt_str(obj, "end", "end_date"),
+        description=_opt_str(obj, "description", "summary"),
     )
 
 
 def _parse_education(obj: Any, idx: int) -> Education:
     if not isinstance(obj, dict):
         raise ProfileError(f"education[{idx}] must be an object")
+    ctx = f"education[{idx}]"
     return Education(
-        school=_require_str(obj, "school", context=f"education[{idx}]"),
-        degree=str(obj.get("degree", "")).strip(),
-        field_of_study=str(obj.get("field_of_study", "")).strip(),
-        start=str(obj.get("start", "")).strip(),
-        end=str(obj.get("end", "")).strip(),
+        school=_require_str(obj, "school", "institution", context=ctx),
+        degree=_opt_str(obj, "degree"),
+        field_of_study=_opt_str(obj, "field_of_study", "field", "concentration", "major"),
+        start=_opt_str(obj, "start", "start_date"),
+        end=_opt_str(obj, "end", "end_date"),
     )
 
 
@@ -201,6 +213,8 @@ def _parse_preferences(obj: dict) -> JobPreferences:
         raise ProfileError("job_preferences.titles has no usable entries")
 
     min_salary = obj.get("min_salary")
+    if min_salary is None:
+        min_salary = obj.get("min_salary_annual")
     if min_salary is not None and not isinstance(min_salary, (int, float)):
         raise ProfileError("job_preferences.min_salary must be a number or null")
 
@@ -214,12 +228,20 @@ def _parse_preferences(obj: dict) -> JobPreferences:
 
     return JobPreferences(
         titles=titles,
-        location=str(obj.get("location", "")).strip(),
-        remote=bool(obj.get("remote", False)),
+        location=_opt_str(obj, "location"),
+        remote=_coerce_remote(obj.get("remote", False)),
         min_salary=int(min_salary) if min_salary is not None else None,
         keywords_exclude=tuple(str(k).strip() for k in excludes if str(k).strip()),
         limit=limit,
     )
+
+
+def _coerce_remote(v: Any) -> bool:
+    """Accept a bool or a loose string ('any', 'remote', 'onsite', ...)."""
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    return s in {"any", "yes", "true", "remote", "hybrid", "either"}
 
 
 def _scalar_to_str(v: Any) -> str:
